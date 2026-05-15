@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+daily_log.txt
+deep_value_*.txt
+report_*.txt
+.env
+venv/
