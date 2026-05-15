@@ -3,10 +3,12 @@ import pandas as pd
 import numpy as np
 import csv, os, sys
 from datetime import datetime
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 from stock_analyzer import AIAnalyzer
 
-CSV_PATH = os.path.join(os.path.dirname(__file__), 'egx_all.csv')
+BASE_DIR = Path(__file__).parent
+CSV_PATH = BASE_DIR / 'egx_all.csv'
 
 def compute_indicators(df):
     d = df.copy()
@@ -73,10 +75,10 @@ def analyze(symbol, name):
             try:
                 ai_df = compute_indicators(hist)
                 ai = AIAnalyzer()
-                ai.train(ai_df)
+                ai.train_or_load(ai_df, symbol)
                 ai_dir, ai_conf = ai.get_signal()
-            except:
-                pass
+            except Exception as e:
+                print(f"  خطأ AI {symbol}: {e}")
 
         return {
             "symbol": symbol.replace('.CA',''), "name": name[:35],
@@ -84,7 +86,8 @@ def analyze(symbol, name):
             "pe": pe, "pb": pb, "rsi": rsi, "score": score, "decision": decision,
             "mc": mc, "ai_dir": ai_dir, "ai_conf": ai_conf,
         }
-    except:
+    except Exception as e:
+        print(f"  خطأ تحليل {symbol}: {e}")
         return None
 
 def generate_report():
@@ -135,7 +138,7 @@ def generate_report():
     print("="*90)
 
     date_str = datetime.now().strftime('%Y%m%d')
-    with open(f"/Users/maysre/AI-Learning/StockProject/deep_value_{date_str}.txt", "w", encoding="utf-8") as f:
+    with open(BASE_DIR / f"deep_value_{date_str}.txt", "w", encoding="utf-8") as f:
         f.write(f"تقرير الاستثمار - {datetime.now().strftime('%Y-%m-%d')}\n")
         f.write(f"إجمالي: {len(results)} سهم\n\n")
         for r in strong + medium + watch:

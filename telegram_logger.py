@@ -1,0 +1,1 @@
+from telegram_bot import send_now as send_telegram_message

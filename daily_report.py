@@ -1,7 +1,11 @@
 from stock_analyzer import StockAnalyzer, AIAnalyzer
 from egx_stocks import EGX_STOCKS, STOCK_SECTORS
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent
 
 def quick_analysis(symbol, name):
     try:
@@ -14,11 +18,15 @@ def quick_analysis(symbol, name):
             "symbol": symbol, "name": name,
             "sector": STOCK_SECTORS.get(symbol, ""),
             "price": f"{s['price']:.2f}",
+            "price_num": round(s['price'], 2),
             "decision": s['decision'],
             "score": s['score'],
             "rsi": f"{s['rsi']:.1f}" if not pd.isna(s['rsi']) else "--",
             "support": f"{s['support']:.2f}" if s['support'] else "--",
             "resistance": f"{s['resistance']:.2f}" if s['resistance'] else "--",
+            "stop_loss": round(s.get('stop_loss', 0), 2) if s.get('stop_loss') else None,
+            "target": round(s.get('target', 0), 2) if s.get('target') else None,
+            "historical_low": s.get('historical_low'),
         }
     except Exception as e:
         return {"symbol": symbol, "name": name, "error": str(e)[:60]}
@@ -30,13 +38,13 @@ def ai_analysis(symbol, name):
         a.add_indicators()
         a.generate_signals()
         ai = AIAnalyzer()
-        ai.train(a.data)
+        ai.train_or_load(a.data, symbol)
         ai_dir, ai_conf = ai.get_signal()
         s = a.signals
         decision = s['decision']
-        if ai_dir == "صاعد" and s['score'] >= 1:
+        if ai_dir == "صاعد" and s['score'] >= 2:
             decision = "شراء (دخول) ✅✅"
-        elif ai_dir == "هابط" and s['score'] <= -1:
+        elif ai_dir == "هابط" and s['score'] <= -2:
             decision = "بيع (خروج) ❌❌"
         return {
             "symbol": symbol, "name": name,
@@ -50,62 +58,57 @@ def ai_analysis(symbol, name):
             "ai_dir": ai_dir or "--",
             "ai_conf": f"{ai_conf:.0%}" if ai_conf else "--",
         }
-    except:
+    except Exception as e:
+        print(f"  خطأ AI {symbol}: {e}")
         return None
 
 def generate_report():
-    print("تحليل سريع لكل الأسهم...\n")
-    quick_results = []
-    for symbol, name in EGX_STOCKS.items():
-        r = quick_analysis(symbol, name)
-        quick_results.append(r)
-        print(f"  {symbol:12s} {r.get('decision', r.get('error','?'))}")
-    buys = [r for r in quick_results if "شراء" in r.get("decision", "")]
-    top = sorted(buys, key=lambda x: int(x.get("score", 0)), reverse=True)[:10]
-    top += [r for r in quick_results if "بيع" in r.get("decision", "")][:5]
+    print(f"🚀 بدء المسح الشامل لأسهم البورصة المصرية...\n")
 
-    print(f"\nتحليل AI لأفضل {len(top)} سهم...")
-    ai_results = []
-    for r in top:
-        print(f"  {r['symbol']} AI...")
-        ar = ai_analysis(r["symbol"], r["name"])
-        if ar:
-            ai_results.append(ar)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        quick_results = list(executor.map(lambda s: quick_analysis(s[0], s[1]), EGX_STOCKS.items()))
 
-    print("\n" + "="*75)
-    print(f"           تقرير البورصة المصرية — {datetime.now().strftime('%Y-%m-%d')}")
-    print("="*75)
+    valid_results = [r for r in quick_results if r and "score" in r]
 
-    buys_all = [r for r in quick_results if "شراء" in r.get("decision", "")]
-    sells_all = [r for r in quick_results if "بيع" in r.get("decision", "")]
-    waits_all = [r for r in quick_results if "انتظار" in r.get("decision", "")]
+    sorted_buys = sorted(
+        [r for r in valid_results if int(r.get('score', 0)) >= 3],
+        key=lambda x: int(x.get('score', 0)),
+        reverse=True
+    )
 
-    if buys_all:
-        print(f"\n🟢 فرص شراء ({len(buys_all)}):")
-        print("-"*75)
-        for r in sorted(buys_all, key=lambda x: int(x.get("score", 0)), reverse=True):
-            ai = next((a for a in ai_results if a["symbol"] == r["symbol"]), None)
-            ai_txt = f" | AI {ai['ai_dir']} ({ai['ai_conf']})" if ai else ""
-            print(f"  {r['symbol']:12s} {r['name']:25s} | سعر {r['price']:>8s} | دعم {r['support']:>8s} | RSI {r['rsi']:>5s}{ai_txt}")
-    if sells_all:
-        print(f"\n🔴 فرص بيع ({len(sells_all)}):")
-        print("-"*75)
-        for r in sorted(sells_all, key=lambda x: int(x.get("score", 0))):
-            ai = next((a for a in ai_results if a["symbol"] == r["symbol"]), None)
-            ai_txt = f" | AI {ai['ai_dir']} ({ai['ai_conf']})" if ai else ""
-            print(f"  {r['symbol']:12s} {r['name']:25s} | سعر {r['price']:>8s} | مقاومة {r['resistance']:>8s} | RSI {r['rsi']:>5s}{ai_txt}")
-    print(f"\n⏳ مراقبة: {len(waits_all)} سهم")
-    print("="*75)
+    telegram_msg = f"🔔 *تقرير النخبة - البورصة المصرية*\n"
+    telegram_msg += f"📅 {datetime.now().strftime('%Y-%m-%d')}\n"
+    telegram_msg += "---------------------------------------\n\n"
+
+    if sorted_buys:
+        telegram_msg += "🏆 *أقوى الفرص المرتبة حسب ثقة الـ AI:*\n\n"
+        for i, stock in enumerate(sorted_buys, 1):
+            rank_icon = "⭐" if i <= 3 else "▫️"
+            sl = stock.get('stop_loss', 'N/A')
+            tg = stock.get('target', 'N/A')
+            h_low = stock.get('historical_low', 0)
+            dist_from_low = ((stock['price_num'] - h_low) / h_low) * 100 if h_low and h_low > 0 else 0
+            telegram_msg += f"{rank_icon} *{stock['symbol']}* - {stock['name']}\n"
+            telegram_msg += f"    🔥 القوة: `% {stock['score']}`\n"
+            telegram_msg += f"    💰 السعر: `{stock['price_num']:.2f} ج.م`\n"
+            telegram_msg += f"    📉 عن القاع: `% {dist_from_low:.1f}+` (قاعه: {h_low:.2f})\n"
+            telegram_msg += f"    🎯 الهدف: `{tg}`\n"
+            telegram_msg += f"    🛡️ الوقف: `{sl}`\n"
+            telegram_msg += "-------------------\n"
+    else:
+        telegram_msg += "⚠️ لم يتم العثور على أسهم تتخطى معايير الجودة اليوم.\n"
 
     date_str = datetime.now().strftime('%Y%m%d_%H%M')
-    with open(f"/Users/maysre/AI-Learning/StockProject/report_{date_str}.txt", "w", encoding="utf-8") as f:
+    with open(BASE_DIR / f"report_{date_str}.txt", "w", encoding="utf-8") as f:
         f.write(f"تقرير البورصة المصرية - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-        f.write(f"إجمالي: {len(buys_all)} شراء | {len(sells_all)} بيع | {len(waits_all)} انتظار\n\n")
-        for r in buys_all + sells_all + waits_all:
-            f.write(f"{r['symbol']} | {r['decision']} | سعر {r['price']} | RSI {r['rsi']}\n")
-    filename = f"report_{date_str}.txt"
-    print(f"\nتم حفظ التقرير: {filename}")
-    print("="*75)
+        f.write(f"إجمالي: {len(sorted_buys)} فرصة\n\n")
+        for r in sorted_buys:
+            f.write(f"{r['symbol']} | {r['decision']} | سعر {r['price_num']} | هدف {r.get('target','')} | وقف {r.get('stop_loss','')}\n")
+
+    print(f"✅ تم إنشاء التقرير والحفظ كـ report_{date_str}.txt")
+    from telegram_logger import send_telegram_message
+    send_telegram_message(telegram_msg)
+    print("✅ تم إرسال أقوى الفرص مرتبة إلى تليجرام.")
 
 if __name__ == "__main__":
     generate_report()

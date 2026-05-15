@@ -3,12 +3,17 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
+from pathlib import Path
 import torch
 import torch.nn as nn
 plt.rcParams['font.family'] = 'Arial'
 
+BASE_DIR = Path(__file__).parent
+MODELS_DIR = BASE_DIR / 'models'
+MODELS_DIR.mkdir(exist_ok=True)
+
 class LSTMPredictor(nn.Module):
-    def __init__(self, input_size=5, hidden=64, layers=2):
+    def __init__(self, input_size=7, hidden=64, layers=2):
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden, layers, dropout=0.2, batch_first=True)
         self.fc = nn.Linear(hidden, 1)
@@ -23,10 +28,17 @@ class AIAnalyzer:
         self.model = None
         self.pred = None
         self.confidence = 0
+        self.mean = None
+        self.std = None
 
     def _prepare_data(self, df, seq_len=20):
-        prices = df[['close', 'volume', 'sma_20', 'rsi', 'macd']].dropna().values
-        prices = (prices - prices.mean(axis=0)) / (prices.std(axis=0) + 1e-8)
+        d = df.copy()
+        d['returns'] = d['close'].pct_change()
+        d['volatility'] = d['close'].rolling(window=10).std()
+        raw = d[['close', 'volume', 'sma_20', 'rsi', 'macd', 'returns', 'volatility']].dropna().values
+        self.mean = raw.mean(axis=0)
+        self.std = raw.std(axis=0) + 1e-8
+        prices = (raw - self.mean) / self.std
         xs, ys = [], []
         for i in range(seq_len, len(prices) - 5):
             xs.append(prices[i-seq_len:i])
@@ -36,6 +48,27 @@ class AIAnalyzer:
                 torch.tensor(np.array(ys[:t]), dtype=torch.float32).unsqueeze(1),
                 torch.tensor(np.array(xs[t:]), dtype=torch.float32),
                 torch.tensor(np.array(ys[t:]), dtype=torch.float32).unsqueeze(1))
+
+    def save(self, symbol):
+        if self.model is None or self.mean is None:
+            return
+        torch.save({
+            'model_state': self.model.state_dict(),
+            'mean': self.mean,
+            'std': self.std,
+        }, MODELS_DIR / f'{symbol.replace(".CA","")}.pth')
+
+    def load(self, symbol):
+        path = MODELS_DIR / f'{symbol.replace(".CA","")}.pth'
+        if not path.exists():
+            return False
+        chk = torch.load(path, map_location=self.device, weights_only=False)
+        self.model = LSTMPredictor().to(self.device)
+        self.model.load_state_dict(chk['model_state'])
+        self.model.eval()
+        self.mean = chk['mean']
+        self.std = chk['std']
+        return True
 
     def train(self, df, seq_len=20, epochs=30):
         x_train, y_train, x_test, y_test = self._prepare_data(df, seq_len)
@@ -60,6 +93,23 @@ class AIAnalyzer:
             latest_input = x_train[-1:].to(self.device)
             self.pred = torch.sigmoid(self.model(latest_input)).item()
             self.confidence = abs(self.pred - 0.5) * 2
+
+    def train_or_load(self, df, symbol, seq_len=20, epochs=30):
+        if self.load(symbol):
+            d = df.copy()
+            d['returns'] = d['close'].pct_change()
+            d['volatility'] = d['close'].rolling(window=10).std()
+            cols = ['close', 'volume', 'sma_20', 'rsi', 'macd', 'returns', 'volatility']
+            raw = d[cols].dropna().values
+            if len(raw) >= seq_len + 5 and raw.shape[1] == len(self.mean):
+                data = (raw[-seq_len:] - self.mean) / self.std
+                inp = torch.tensor(data, dtype=torch.float32).unsqueeze(0).to(self.device)
+                with torch.no_grad():
+                    self.pred = torch.sigmoid(self.model(inp)).item()
+                    self.confidence = abs(self.pred - 0.5) * 2
+                return
+        self.train(df, seq_len, epochs)
+        self.save(symbol)
 
     def get_signal(self):
         if self.pred is None:
@@ -98,6 +148,32 @@ class StockAnalyzer:
         bb_std = df['close'].rolling(20).std()
         df['bb_upper'] = df['bb_mid'] + 2 * bb_std
         df['bb_lower'] = df['bb_mid'] - 2 * bb_std
+
+        low14 = df['low'].rolling(14).min()
+        high14 = df['high'].rolling(14).max()
+        df['stoch_k'] = 100 * (df['close'] - low14) / (high14 - low14)
+        df['stoch_d'] = df['stoch_k'].rolling(3).mean()
+
+        df['tr'] = np.maximum(df['high'] - df['low'],
+                     np.maximum(abs(df['high'] - df['close'].shift(1)),
+                                abs(df['low'] - df['close'].shift(1))))
+        df['atr'] = df['tr'].rolling(14).mean()
+        up = df['high'].diff()
+        down = -df['low'].diff()
+        df['plus_dm'] = np.where((up > down) & (up > 0), up, 0)
+        df['minus_dm'] = np.where((down > up) & (down > 0), down, 0)
+        df['plus_di'] = 100 * df['plus_dm'].rolling(14).mean() / df['atr']
+        df['minus_di'] = 100 * df['minus_dm'].rolling(14).mean() / df['atr']
+        df['dx'] = 100 * abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'])
+        df['adx'] = df['dx'].rolling(14).mean()
+
+        df['ichimoku_conv'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
+        df['ichimoku_base'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
+        df['ichimoku_span_a'] = ((df['ichimoku_conv'] + df['ichimoku_base']) / 2).shift(26)
+        span_b_high = df['high'].rolling(52).max()
+        span_b_low = df['low'].rolling(52).min()
+        df['ichimoku_span_b'] = ((span_b_high + span_b_low) / 2).shift(26)
+
         self.data = df
 
     def find_support_resistance(self, lookback=60):
@@ -123,6 +199,15 @@ class StockAnalyzer:
         latest = df.iloc[-1]
         prev = df.iloc[-2]
 
+        historical_low = self.data['low'].min()
+        proximity_to_low = ((latest['close'] - historical_low) / historical_low) * 100
+        if proximity_to_low < 10:
+            score += 20
+            reasons.append(f"💎 سهم لقطة: قريب جداً من قاعه التاريخي ({historical_low:.2f})")
+        elif proximity_to_low < 25:
+            score += 10
+            reasons.append("⚖️ السعر في مناطق دعم تاريخية جيدة")
+
         if latest['sma_20'] > latest['sma_50']:
             score += 1
             reasons.append("SMA20 فوق SMA50 (اتجاه صاعد)")
@@ -139,24 +224,57 @@ class StockAnalyzer:
 
         if latest['rsi'] < 30:
             score += 2
-            reasons.append(f"RSI {latest['rsi']:.1f} — منطقة ذروة بيع (شراء)")
+            reasons.append(f"RSI {latest['rsi']:.1f} — ذروة بيع (شراء)")
         elif latest['rsi'] > 70:
             score -= 2
-            reasons.append(f"RSI {latest['rsi']:.1f} — منطقة ذروة شراء (بيع)")
+            reasons.append(f"RSI {latest['rsi']:.1f} — ذروة شراء (بيع)")
         elif 40 <= latest['rsi'] <= 60:
-            reasons.append(f"RSI {latest['rsi']:.1f} — منطقة محايدة")
+            reasons.append(f"RSI {latest['rsi']:.1f} — محايد")
+
+        if latest['stoch_k'] < 20:
+            score += 1
+            reasons.append(f"Stochastic {latest['stoch_k']:.0f} — ذروة بيع (شراء)")
+        elif latest['stoch_k'] > 80:
+            score -= 1
+            reasons.append(f"Stochastic {latest['stoch_k']:.0f} — ذروة شراء (بيع)")
+
+        adx_val = latest['adx']
+        if adx_val > 25:
+            if latest['plus_di'] > latest['minus_di']:
+                score += 1
+                reasons.append(f"ADX {adx_val:.0f} — اتجاه صاعد قوي")
+            else:
+                score -= 1
+                reasons.append(f"ADX {adx_val:.0f} — اتجاه هابط قوي")
+        else:
+            reasons.append(f"ADX {adx_val:.0f} — بدون اتجاه واضح")
+
+        close = latest['close']
+        span_a = latest['ichimoku_span_a']
+        span_b = latest['ichimoku_span_b']
+        conv = latest['ichimoku_conv']
+        base = latest['ichimoku_base']
+        if not np.isnan(span_a) and not np.isnan(span_b):
+            if close > max(span_a, span_b) and conv > base:
+                score += 1
+                reasons.append("Ichimoku — فوق السحابة (اتجاه صاعد)")
+            elif close < min(span_a, span_b) and conv < base:
+                score -= 1
+                reasons.append("Ichimoku — تحت السحابة (اتجاه هابط)")
+            else:
+                reasons.append("Ichimoku — داخل السحابة (محايد)")
 
         s_level, r_level = self.find_support_resistance()
         if s_level and latest['close'] <= s_level * 1.03:
             score += 1
-            reasons.append(f"قرب مستوى دعم ({s_level:.2f})")
+            reasons.append(f"قرب دعم ({s_level:.2f})")
         if r_level and latest['close'] >= r_level * 0.97:
             score -= 1
-            reasons.append(f"قرب مستوى مقاومة ({r_level:.2f})")
+            reasons.append(f"قرب مقاومة ({r_level:.2f})")
 
-        if score >= 2:
+        if score >= 3:
             decision = "شراء (دخول) ✅"
-        elif score <= -2:
+        elif score <= -3:
             decision = "بيع (خروج) ❌"
         else:
             decision = "انتظار ⏳"
@@ -164,6 +282,15 @@ class StockAnalyzer:
         patterns = self.detect_patterns()
         if patterns:
             reasons.extend(patterns)
+
+        atr_val = latest['atr']
+        stop_loss = None
+        target = None
+        if "شراء" in decision:
+            stop_loss = latest['close'] - (atr_val * 2)
+            target = latest['close'] + (atr_val * 2)
+            reasons.append(f"🛡️ وقف الخسارة: {stop_loss:.2f}")
+            reasons.append(f"🎯 الهدف الأول: {target:.2f}")
 
         self.signals = {
             'decision': decision,
@@ -173,6 +300,10 @@ class StockAnalyzer:
             'macd': latest['macd'],
             'support': s_level,
             'resistance': r_level,
+            'stop_loss': stop_loss,
+            'target': target,
+            'historical_low': round(historical_low, 2),
+            'proximity_to_low': round(proximity_to_low, 1),
             'reasons': reasons,
             'date': latest.name,
             'patterns': patterns,
@@ -233,7 +364,7 @@ class StockAnalyzer:
 
         plt.tight_layout()
         if save:
-            plt.savefig(f'/Users/maysre/AI-Learning/StockProject/{self.symbol}_analysis.png', dpi=150)
+            plt.savefig(BASE_DIR / f'{self.symbol}_analysis.png', dpi=150)
             print("تم حفظ الشارت")
         plt.show()
 
@@ -316,21 +447,73 @@ class StockAnalyzer:
         print("تحليل المؤشرات...")
         self.add_indicators()
         self.generate_signals()
-        print("تدريب نموذج AI...")
+        print("تحليل AI...")
         ai = AIAnalyzer()
-        ai.train(self.data)
+        ai.train_or_load(self.data, self.symbol)
         ai_dir, ai_conf = ai.get_signal()
         if ai_dir:
             self.signals['ai_prediction'] = f"{ai_dir} (ثقة {ai_conf:.0%})"
-            if ai_dir == "صاعد" and self.signals['score'] >= 1:
+            if ai_dir == "صاعد" and self.signals['score'] >= 2:
                 self.signals['decision'] = "شراء (دخول) ✅✅"
                 self.signals['reasons'].append(f"AI يتوقع {ai_dir} بثقة {ai_conf:.0%}")
-            elif ai_dir == "هابط" and self.signals['score'] <= -1:
+            elif ai_dir == "هابط" and self.signals['score'] <= -2:
                 self.signals['decision'] = "بيع (خروج) ❌❌"
                 self.signals['reasons'].append(f"AI يتوقع {ai_dir} بثقة {ai_conf:.0%}")
             else:
                 self.signals['reasons'].append(f"AI يتوقع {ai_dir} بثقة {ai_conf:.0%}")
         self.show_analysis()
+
+LEADERS_TICKERS = ["COMI.CA", "FWRY.CA", "SKPC.CA", "EKHO.CA", "ABUK.CA", "TMGH.CA"]
+
+def check_volume_spike(symbol, df):
+    d = df.copy()
+    if isinstance(d.columns, pd.MultiIndex):
+        d.columns = d.columns.droplevel(1)
+    col_key = 'volume' if 'volume' in d.columns else 'Volume'
+    if len(d) < 20:
+        return None
+
+    latest_volume = d[col_key].iloc[-1]
+    avg_volume = d[col_key].iloc[-20:-1].mean()
+
+    volume_ratio = latest_volume / avg_volume if avg_volume > 0 else 0
+
+    if volume_ratio >= 3.0:
+        close_col = 'close' if 'close' in d.columns else 'Close'
+        alert_msg = (
+            f"🌊 **إنذار تدفق سيولة (Volume Spike)**\n"
+            f"-----------------------------------\n"
+            f"⚠️ السهم: *{symbol}*\n"
+            f"📊 حجم التداول الآن أعلى من المعتاد بـ `{volume_ratio:.1f}` مرة!\n"
+            f"💰 السعر الحالي: `{d[close_col].iloc[-1]:.2f} ج.م`\n"
+            f"💡 *هناك دخول قوي للسيولة، راقب اختراق المقاومات.*"
+        )
+        return alert_msg
+    return None
+
+
+def check_historical_bottoms(symbol, df):
+    d = df.copy()
+    if isinstance(d.columns, pd.MultiIndex):
+        d.columns = d.columns.droplevel(1)
+    d.columns = [c.lower() for c in d.columns]
+    latest_price = d['close'].iloc[-1]
+    hist_low = d['low'].min()
+
+    proximity = ((latest_price - hist_low) / hist_low) * 100
+
+    if proximity <= 1.5:
+        alert_msg = (
+            f"🚨 **تنبيه صيد القاع (Bottom Alert)**\n"
+            f"-----------------------------------\n"
+            f"⚠️ السهم القيادي: *{symbol}*\n"
+            f"💰 السعر الحالي: `{latest_price:.2f} ج.م`\n"
+            f"📉 القاع التاريخي: `{hist_low:.2f} ج.م`\n"
+            f"🎯 المسافة عن القاع: `% {proximity:.1f}` فقط!\n"
+            f"💡 *فرصة ارتداد قوية محتملة (High Margin of Safety)*"
+        )
+        return alert_msg
+    return None
 
 if __name__ == "__main__":
     print("أسهم البورصة المصرية (EGX)")
