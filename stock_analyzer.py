@@ -12,6 +12,7 @@ BASE_DIR = Path(__file__).parent
 MODELS_DIR = BASE_DIR / 'models'
 MODELS_DIR.mkdir(exist_ok=True)
 
+
 class LSTMPredictor(nn.Module):
     def __init__(self, input_size=7, hidden=64, layers=2):
         super().__init__()
@@ -21,6 +22,7 @@ class LSTMPredictor(nn.Module):
     def forward(self, x):
         out, _ = self.lstm(x)
         return self.fc(out[:, -1, :])
+
 
 class AIAnalyzer:
     def __init__(self, device=None):
@@ -71,28 +73,28 @@ class AIAnalyzer:
         return True
 
     def train(self, df, seq_len=20, epochs=30):
-        x_train, y_train, x_test, y_test = self._prepare_data(df, seq_len)
-        if len(x_train) < 50:
-            return
-        self.model = LSTMPredictor().to(self.device)
-        opt = torch.optim.Adam(self.model.parameters(), lr=0.001)
-        loss_fn = nn.BCEWithLogitsLoss()
-        self.model.train()
-        for _ in range(epochs):
-            for b in range(0, len(x_train), 32):
-                bx, by = x_train[b:b+32].to(self.device), y_train[b:b+32].to(self.device)
-                opt.zero_grad()
-                loss_fn(self.model(bx), by).backward()
-                opt.step()
-        self.model.eval()
-        with torch.no_grad():
-            logits = self.model(x_test.to(self.device))
-            probs = torch.sigmoid(logits)
-            preds = (probs > 0.5).float()
-            acc = (preds.cpu() == y_test).float().mean().item()
-            latest_input = x_train[-1:].to(self.device)
-            self.pred = torch.sigmoid(self.model(latest_input)).item()
-            self.confidence = abs(self.pred - 0.5) * 2
+        try:
+            x_train, y_train, x_test, y_test = self._prepare_data(df, seq_len)
+            if len(x_train) < 50:
+                return
+            self.model = LSTMPredictor().to(self.device)
+            opt = torch.optim.Adam(self.model.parameters(), lr=0.001)
+            loss_fn = nn.BCEWithLogitsLoss()
+            self.model.train()
+            for _ in range(epochs):
+                for b in range(0, len(x_train), 32):
+                    bx, by = x_train[b:b+32].to(self.device), y_train[b:b+32].to(self.device)
+                    opt.zero_grad()
+                    loss_fn(self.model(bx), by).backward()
+                    opt.step()
+            self.model.eval()
+            with torch.no_grad():
+                latest_input = x_train[-1:].to(self.device)
+                self.pred = torch.sigmoid(self.model(latest_input)).item()
+                self.confidence = abs(self.pred - 0.5) * 2
+        except Exception as e:
+            print(f"⚠️ فشل تدريب الـ AI للسهم: {e}")
+            self.pred = None
 
     def train_or_load(self, df, symbol, seq_len=20, epochs=30):
         if self.load(symbol):
@@ -116,6 +118,7 @@ class AIAnalyzer:
             return None, 0
         direction = "صاعد" if self.pred > 0.5 else "هابط"
         return direction, self.confidence
+
 
 class StockAnalyzer:
     def __init__(self, symbol, period="2y"):
@@ -148,12 +151,10 @@ class StockAnalyzer:
         bb_std = df['close'].rolling(20).std()
         df['bb_upper'] = df['bb_mid'] + 2 * bb_std
         df['bb_lower'] = df['bb_mid'] - 2 * bb_std
-
         low14 = df['low'].rolling(14).min()
         high14 = df['high'].rolling(14).max()
         df['stoch_k'] = 100 * (df['close'] - low14) / (high14 - low14)
         df['stoch_d'] = df['stoch_k'].rolling(3).mean()
-
         df['tr'] = np.maximum(df['high'] - df['low'],
                      np.maximum(abs(df['high'] - df['close'].shift(1)),
                                 abs(df['low'] - df['close'].shift(1))))
@@ -166,21 +167,18 @@ class StockAnalyzer:
         df['minus_di'] = 100 * df['minus_dm'].rolling(14).mean() / df['atr']
         df['dx'] = 100 * abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'])
         df['adx'] = df['dx'].rolling(14).mean()
-
         df['ichimoku_conv'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
         df['ichimoku_base'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
         df['ichimoku_span_a'] = ((df['ichimoku_conv'] + df['ichimoku_base']) / 2).shift(26)
         span_b_high = df['high'].rolling(52).max()
         span_b_low = df['low'].rolling(52).min()
         df['ichimoku_span_b'] = ((span_b_high + span_b_low) / 2).shift(26)
-
         self.data = df
 
     def find_support_resistance(self, lookback=60):
         df = self.data.tail(lookback).copy()
         highs = df['high'].values
         lows = df['low'].values
-        closes = df['close'].values
         resistance = []
         support = []
         for i in range(2, len(highs) - 2):
@@ -192,7 +190,7 @@ class StockAnalyzer:
         s_level = np.mean(support[-3:]) if len(support) >= 3 else min(support) if support else None
         return s_level, r_level
 
-    def generate_signals(self):
+    def generate_signals(self, ai_dir=None, ai_conf=0):
         df = self.data.tail(200).copy()
         score = 0
         reasons = []
@@ -202,79 +200,52 @@ class StockAnalyzer:
         historical_low = self.data['low'].min()
         proximity_to_low = ((latest['close'] - historical_low) / historical_low) * 100
         if proximity_to_low < 10:
-            score += 20
+            score += 25
             reasons.append(f"💎 سهم لقطة: قريب جداً من قاعه التاريخي ({historical_low:.2f})")
         elif proximity_to_low < 25:
-            score += 10
+            score += 15
             reasons.append("⚖️ السعر في مناطق دعم تاريخية جيدة")
 
-        if latest['sma_20'] > latest['sma_50']:
-            score += 1
-            reasons.append("SMA20 فوق SMA50 (اتجاه صاعد)")
-        elif latest['sma_20'] < latest['sma_50']:
-            score -= 1
-            reasons.append("SMA20 تحت SMA50 (اتجاه هابط)")
+        if ai_dir == "صاعد":
+            ai_weight = int(ai_conf * 35)
+            score += ai_weight
+            reasons.append(f"🚀 ذكاء اصطناعي صاعد: يدعم الصعود بقوة +{ai_weight}")
+        elif ai_dir == "هابط":
+            ai_weight = int(ai_conf * 35)
+            score -= ai_weight
+            reasons.append(f"⚠️ ذكاء اصطناعي هابط: يحذر من الهبوط بقوة -{ai_weight}")
+
+        if latest['close'] > latest['sma_20']:
+            score += 15
+            reasons.append("✅ السعر فوق المتوسط المتحرك SMA 20")
 
         if prev['macd'] <= prev['macd_signal'] and latest['macd'] > latest['macd_signal']:
-            score += 1
-            reasons.append("MACD تقاطع شراء")
-        elif prev['macd'] >= prev['macd_signal'] and latest['macd'] < latest['macd_signal']:
-            score -= 1
-            reasons.append("MACD تقاطع بيع")
+            score += 10
+            reasons.append("📈 MACD تقاطع شراء إيجابي")
 
-        if latest['rsi'] < 30:
-            score += 2
-            reasons.append(f"RSI {latest['rsi']:.1f} — ذروة بيع (شراء)")
+        if 40 <= latest['rsi'] <= 65:
+            score += 15
+            reasons.append(f"📊 RSI مثالي وفي منطقة زخم آمنة ({latest['rsi']:.1f})")
+        elif latest['rsi'] < 30:
+            score += 10
+            reasons.append(f"⚡ RSI ذروة بيع - ارتداد محتمل ({latest['rsi']:.1f})")
         elif latest['rsi'] > 70:
-            score -= 2
-            reasons.append(f"RSI {latest['rsi']:.1f} — ذروة شراء (بيع)")
-        elif 40 <= latest['rsi'] <= 60:
-            reasons.append(f"RSI {latest['rsi']:.1f} — محايد")
+            score -= 20
+            reasons.append(f"🚨 RSI تضخم صعودي حاد ({latest['rsi']:.1f})")
 
         if latest['stoch_k'] < 20:
-            score += 1
-            reasons.append(f"Stochastic {latest['stoch_k']:.0f} — ذروة بيع (شراء)")
-        elif latest['stoch_k'] > 80:
-            score -= 1
-            reasons.append(f"Stochastic {latest['stoch_k']:.0f} — ذروة شراء (بيع)")
+            score += 5
+            reasons.append("Stochastic في منطقة ذروة البيع")
 
-        adx_val = latest['adx']
-        if adx_val > 25:
-            if latest['plus_di'] > latest['minus_di']:
-                score += 1
-                reasons.append(f"ADX {adx_val:.0f} — اتجاه صاعد قوي")
-            else:
-                score -= 1
-                reasons.append(f"ADX {adx_val:.0f} — اتجاه هابط قوي")
-        else:
-            reasons.append(f"ADX {adx_val:.0f} — بدون اتجاه واضح")
+        if latest['adx'] > 25 and latest['plus_di'] > latest['minus_di']:
+            score += 10
+            reasons.append("ADX يؤكد قوة الاتجاه الصاعد الحالي")
 
-        close = latest['close']
-        span_a = latest['ichimoku_span_a']
-        span_b = latest['ichimoku_span_b']
-        conv = latest['ichimoku_conv']
-        base = latest['ichimoku_base']
-        if not np.isnan(span_a) and not np.isnan(span_b):
-            if close > max(span_a, span_b) and conv > base:
-                score += 1
-                reasons.append("Ichimoku — فوق السحابة (اتجاه صاعد)")
-            elif close < min(span_a, span_b) and conv < base:
-                score -= 1
-                reasons.append("Ichimoku — تحت السحابة (اتجاه هابط)")
-            else:
-                reasons.append("Ichimoku — داخل السحابة (محايد)")
-
-        s_level, r_level = self.find_support_resistance()
-        if s_level and latest['close'] <= s_level * 1.03:
-            score += 1
-            reasons.append(f"قرب دعم ({s_level:.2f})")
-        if r_level and latest['close'] >= r_level * 0.97:
-            score -= 1
-            reasons.append(f"قرب مقاومة ({r_level:.2f})")
-
-        if score >= 3:
-            decision = "شراء (دخول) ✅"
-        elif score <= -3:
+        if score >= 75:
+            decision = "🔥 شراء قوي (High Confidence)"
+        elif score >= 50:
+            decision = "⚡ شراء مضاربي (Medium Confidence)"
+        elif score <= -20:
             decision = "بيع (خروج) ❌"
         else:
             decision = "انتظار ⏳"
@@ -284,48 +255,37 @@ class StockAnalyzer:
             reasons.extend(patterns)
 
         atr_val = latest['atr']
-        stop_loss = None
-        target = None
-        if "شراء" in decision:
-            stop_loss = latest['close'] - (atr_val * 2)
-            target = latest['close'] + (atr_val * 2)
-            reasons.append(f"🛡️ وقف الخسارة: {stop_loss:.2f}")
-            reasons.append(f"🎯 الهدف الأول: {target:.2f}")
+        stop_loss = latest['close'] - (atr_val * 2)
+        target = latest['close'] + (atr_val * 2)
+
+        reasons.append(f"🛡️ حماية: وقف الخسارة الصارم عند {stop_loss:.2f}")
+        reasons.append(f"🎯 مستهدف: الهدف الأول الفني عند {target:.2f}")
+
+        s_level, r_level = self.find_support_resistance()
 
         self.signals = {
-            'decision': decision,
-            'score': score,
-            'price': latest['close'],
-            'rsi': latest['rsi'],
-            'macd': latest['macd'],
-            'support': s_level,
-            'resistance': r_level,
-            'stop_loss': stop_loss,
-            'target': target,
+            'decision': decision, 'score': score, 'price': latest['close'],
+            'rsi': latest['rsi'], 'macd': latest['macd'],
+            'support': s_level, 'resistance': r_level,
+            'stop_loss': round(stop_loss, 2), 'target': round(target, 2),
             'historical_low': round(historical_low, 2),
             'proximity_to_low': round(proximity_to_low, 1),
-            'reasons': reasons,
-            'date': latest.name,
-            'patterns': patterns,
+            'reasons': reasons, 'date': latest.name, 'patterns': patterns,
         }
 
     def show_analysis(self):
         print(f"\n{'='*50}")
         print(f"تحليل سهم: {self.symbol}")
         print(f"تاريخ التحليل: {self.signals['date']}")
-        print(f"السعر الحالي: {self.signals['price']:.2f}")
+        print(f"السعر الحالي: {self.signals['price']:.2f} ج.م")
         print(f"{'='*50}")
-        print(f"القرار: {self.signals['decision']}")
+        print(f"القرار النهائي: {self.signals['decision']}")
+        print(f"درجة تقييم النظام الكلية (Score): {self.signals['score']}%")
         if 'ai_prediction' in self.signals:
-            print(f"AI: {self.signals['ai_prediction']}")
-        print(f"RSI: {self.signals['rsi']:.2f}")
-        print(f"MACD: {self.signals['macd']:.5f}")
-        if self.signals['support']:
-            print(f"مستوى دعم: {self.signals['support']:.2f}")
-        if self.signals['resistance']:
-            print(f"مستوى مقاومة: {self.signals['resistance']:.2f}")
+            print(f"تنبؤ الـ AI العصبوني: {self.signals['ai_prediction']}")
+        print(f"البعد عن القاع التاريخي: % {self.signals['proximity_to_low']}+")
         print(f"{'='*50}")
-        print("الأسباب:")
+        print("الأسباب الفنية واستراتيجية الدخول:")
         for r in self.signals['reasons']:
             print(f"  - {r}")
         print(f"{'='*50}\n")
@@ -346,7 +306,6 @@ class StockAnalyzer:
         ax1.set_ylabel('السعر')
         ax1.legend()
         ax1.grid(alpha=0.2)
-
         ax2.plot(df.index, df['rsi'], color='#9C27B0', linewidth=2)
         ax2.axhline(y=70, color='red', linestyle='--', alpha=0.5)
         ax2.axhline(y=30, color='green', linestyle='--', alpha=0.5)
@@ -354,18 +313,16 @@ class StockAnalyzer:
         ax2.set_ylabel('RSI')
         ax2.set_ylim(0, 100)
         ax2.grid(alpha=0.2)
-
         ax3.plot(df.index, df['macd'], label='MACD', color='#2196F3', linewidth=2)
         ax3.plot(df.index, df['macd_signal'], label='Signal', color='#FF9800', linestyle='--')
         ax3.bar(df.index, df['macd'] - df['macd_signal'], color=np.where(df['macd'] > df['macd_signal'], '#4CAF50', '#F44336'), alpha=0.3)
         ax3.set_ylabel('MACD')
         ax3.legend()
         ax3.grid(alpha=0.2)
-
         plt.tight_layout()
         if save:
             plt.savefig(BASE_DIR / f'{self.symbol}_analysis.png', dpi=150)
-            print("تم حفظ الشارت")
+            print("تم حفظ الشارت بنجاح")
         plt.show()
 
     def detect_patterns(self):
@@ -379,91 +336,37 @@ class StockAnalyzer:
             range_c = c['high'] - c['low']
             if range_p == 0 or range_c == 0:
                 continue
-
-            # doji
             if body_c / range_c < 0.1:
                 if c['close'] < p['close'] - body_p * 0.3:
-                    patterns.append(f"🔴 دوجي عند القمة — احتمال انعكاس هابط")
+                    patterns.append("🔴 دوجي عند القمة — احتمال انعكاس هابط")
                 elif c['close'] > p['close'] + body_p * 0.3:
-                    patterns.append(f"🟢 دوجي عند القاع — احتمال انعكاس صاعد")
-                else:
-                    patterns.append(f"⚪ دوجي — حيرة في السوق")
-            # hammer
+                    patterns.append("🟢 دوجي عند القاع — احتمال انعكاس صاعد")
             upper = c['high'] - max(c['close'], c['open'])
             lower = min(c['close'], c['open']) - c['low']
             if lower > body_c * 2 and upper < body_c * 0.3 and body_c / range_c > 0.1:
-                patterns.append(f"🟢 شمعة مطرقة (Hammer) — احتمال انعكاس صاعد")
-            # shooting star
+                patterns.append("🟢 شمعة مطرقة (Hammer) — احتمال انعكاس صاعد")
             if upper > body_c * 2 and lower < body_c * 0.3 and body_c / range_c > 0.1:
-                patterns.append(f"🔴 شمعة نجم ثاقب (Shooting Star) — احتمال انعكاس هابط")
-            # engulfing
+                patterns.append("🔴 شمعة نجم ثاقب (Shooting Star) — احتمال انعكاس هابط")
             if p['close'] > p['open'] and c['close'] < c['open'] and c['open'] > p['close'] and c['close'] < p['open']:
-                patterns.append(f"🔴 شمعة ابتلاع هابطة (Bearish Engulfing)")
+                patterns.append("🔴 شمعة ابتلاع هابطة (Bearish Engulfing)")
             if p['close'] < p['open'] and c['close'] > c['open'] and c['open'] < p['close'] and c['close'] > p['open']:
-                patterns.append(f"🟢 شمعة ابتلاع صاعدة (Bullish Engulfing)")
-            # three white soldiers / three black crows (simplified)
-            if i >= 3:
-                c1, c2, c3 = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
-                if (c1['close'] > c1['open'] and c2['close'] > c2['open'] and c3['close'] > c3['open'] and
-                    c2['close'] > c1['close'] and c3['close'] > c2['close']):
-                    patterns.append(f"🟢 ثلاثة جنود بيض (Three White Soldiers) — اتجاه صاعد قوي")
-                if (c1['close'] < c1['open'] and c2['close'] < c2['open'] and c3['close'] < c3['open'] and
-                    c2['close'] < c1['close'] and c3['close'] < c2['close']):
-                    patterns.append(f"🔴 ثلاثة غربان سود (Three Black Crows) — اتجاه هابط قوي")
+                patterns.append("🟢 شمعة ابتلاع صاعدة (Bullish Engulfing)")
         return patterns
 
-    def plot_candlestick(self):
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-        df = self.data.tail(120).copy()
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-                            row_heights=[0.6, 0.2, 0.2])
-
-        fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'],
-                      low=df['low'], close=df['close'], name='السعر',
-                      increasing_line_color='#4CAF50', decreasing_line_color='#F44336'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['sma_20'], line=dict(color='#FF9800', width=1), name='SMA 20'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['sma_50'], line=dict(color='#9C27B0', width=1), name='SMA 50'), row=1, col=1)
-        s, r = self.find_support_resistance()
-        if s:
-            fig.add_hline(y=s, line_color='green', line_dash='dot', annotation_text=f'دعم {s:.2f}', row=1, col=1)
-        if r:
-            fig.add_hline(y=r, line_color='red', line_dash='dot', annotation_text=f'مقاومة {r:.2f}', row=1, col=1)
-
-        fig.add_trace(go.Scatter(x=df.index, y=df['rsi'], line=dict(color='#9C27B0'), name='RSI'), row=2, col=1)
-        fig.add_hline(y=70, line_color='red', line_dash='dash', row=2, col=1)
-        fig.add_hline(y=30, line_color='green', line_dash='dash', row=2, col=1)
-
-        fig.add_trace(go.Scatter(x=df.index, y=df['macd'], line=dict(color='#2196F3'), name='MACD'), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['macd_signal'], line=dict(color='#FF9800'), name='Signal'), row=3, col=1)
-
-        fig.update_layout(title=f'{self.symbol} — رسم بياني تفاعلي', xaxis_rangeslider_visible=False,
-                          height=700, template='plotly_white')
-        return fig
-
     def run(self):
-        print(f"جلب بيانات {self.symbol}...")
         self.fetch_data()
-        print("تحليل المؤشرات...")
         self.add_indicators()
-        self.generate_signals()
-        print("تحليل AI...")
         ai = AIAnalyzer()
         ai.train_or_load(self.data, self.symbol)
         ai_dir, ai_conf = ai.get_signal()
+        self.generate_signals(ai_dir, ai_conf)
         if ai_dir:
             self.signals['ai_prediction'] = f"{ai_dir} (ثقة {ai_conf:.0%})"
-            if ai_dir == "صاعد" and self.signals['score'] >= 2:
-                self.signals['decision'] = "شراء (دخول) ✅✅"
-                self.signals['reasons'].append(f"AI يتوقع {ai_dir} بثقة {ai_conf:.0%}")
-            elif ai_dir == "هابط" and self.signals['score'] <= -2:
-                self.signals['decision'] = "بيع (خروج) ❌❌"
-                self.signals['reasons'].append(f"AI يتوقع {ai_dir} بثقة {ai_conf:.0%}")
-            else:
-                self.signals['reasons'].append(f"AI يتوقع {ai_dir} بثقة {ai_conf:.0%}")
         self.show_analysis()
 
+
 LEADERS_TICKERS = ["COMI.CA", "FWRY.CA", "SKPC.CA", "EKHO.CA", "ABUK.CA", "TMGH.CA"]
+
 
 def check_volume_spike(symbol, df):
     d = df.copy()
@@ -472,12 +375,9 @@ def check_volume_spike(symbol, df):
     col_key = 'volume' if 'volume' in d.columns else 'Volume'
     if len(d) < 20:
         return None
-
     latest_volume = d[col_key].iloc[-1]
     avg_volume = d[col_key].iloc[-20:-1].mean()
-
     volume_ratio = latest_volume / avg_volume if avg_volume > 0 else 0
-
     if volume_ratio >= 3.0:
         close_col = 'close' if 'close' in d.columns else 'Close'
         alert_msg = (
@@ -499,9 +399,7 @@ def check_historical_bottoms(symbol, df):
     d.columns = [c.lower() for c in d.columns]
     latest_price = d['close'].iloc[-1]
     hist_low = d['low'].min()
-
     proximity = ((latest_price - hist_low) / hist_low) * 100
-
     if proximity <= 1.5:
         alert_msg = (
             f"🚨 **تنبيه صيد القاع (Bottom Alert)**\n"
@@ -514,6 +412,7 @@ def check_historical_bottoms(symbol, df):
         )
         return alert_msg
     return None
+
 
 if __name__ == "__main__":
     print("أسهم البورصة المصرية (EGX)")
