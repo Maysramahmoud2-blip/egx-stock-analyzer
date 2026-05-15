@@ -4,29 +4,40 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from pathlib import Path
-import torch
-import torch.nn as nn
+
+try:
+    import torch
+    import torch.nn as nn
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 plt.rcParams['font.family'] = 'Arial'
 
 BASE_DIR = Path(__file__).parent
 MODELS_DIR = BASE_DIR / 'models'
-MODELS_DIR.mkdir(exist_ok=True)
+if TORCH_AVAILABLE:
+    MODELS_DIR.mkdir(exist_ok=True)
 
 
-class LSTMPredictor(nn.Module):
-    def __init__(self, input_size=7, hidden=64, layers=2):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden, layers, dropout=0.2, batch_first=True)
-        self.fc = nn.Linear(hidden, 1)
+if TORCH_AVAILABLE:
+    class LSTMPredictor(nn.Module):
+        def __init__(self, input_size=7, hidden=64, layers=2):
+            super().__init__()
+            self.lstm = nn.LSTM(input_size, hidden, layers, dropout=0.2, batch_first=True)
+            self.fc = nn.Linear(hidden, 1)
 
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :])
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.fc(out[:, -1, :])
 
 
 class AIAnalyzer:
     def __init__(self, device=None):
-        self.device = device or ('mps' if torch.backends.mps.is_available() else 'cpu')
+        if TORCH_AVAILABLE:
+            self.device = device or ('mps' if torch.backends.mps.is_available() else 'cpu')
+        else:
+            self.device = 'cpu'
         self.model = None
         self.pred = None
         self.confidence = 0
@@ -34,6 +45,8 @@ class AIAnalyzer:
         self.std = None
 
     def _prepare_data(self, df, seq_len=20):
+        if not TORCH_AVAILABLE:
+            return None, None, None, None
         d = df.copy()
         d['returns'] = d['close'].pct_change()
         d['volatility'] = d['close'].rolling(window=10).std()
@@ -52,7 +65,7 @@ class AIAnalyzer:
                 torch.tensor(np.array(ys[t:]), dtype=torch.float32).unsqueeze(1))
 
     def save(self, symbol):
-        if self.model is None or self.mean is None:
+        if not TORCH_AVAILABLE or self.model is None or self.mean is None:
             return
         torch.save({
             'model_state': self.model.state_dict(),
@@ -61,6 +74,8 @@ class AIAnalyzer:
         }, MODELS_DIR / f'{symbol.replace(".CA","")}.pth')
 
     def load(self, symbol):
+        if not TORCH_AVAILABLE:
+            return False
         path = MODELS_DIR / f'{symbol.replace(".CA","")}.pth'
         if not path.exists():
             return False
@@ -73,9 +88,12 @@ class AIAnalyzer:
         return True
 
     def train(self, df, seq_len=20, epochs=30):
+        if not TORCH_AVAILABLE:
+            print("⚠️ PyTorch غير متاح — تم تخطي تدريب AI")
+            return
         try:
             x_train, y_train, x_test, y_test = self._prepare_data(df, seq_len)
-            if len(x_train) < 50:
+            if x_train is None or len(x_train) < 50:
                 return
             self.model = LSTMPredictor().to(self.device)
             opt = torch.optim.Adam(self.model.parameters(), lr=0.001)
@@ -97,6 +115,8 @@ class AIAnalyzer:
             self.pred = None
 
     def train_or_load(self, df, symbol, seq_len=20, epochs=30):
+        if not TORCH_AVAILABLE:
+            return
         if self.load(symbol):
             d = df.copy()
             d['returns'] = d['close'].pct_change()
