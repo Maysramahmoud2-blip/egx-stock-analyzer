@@ -6,3 +6,7 @@ deep_value_*.txt
 report_*.txt
 .env
 venv/
+.cache_*.json
+telegram_config.txt
+predictions.db
+models/
