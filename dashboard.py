@@ -8,8 +8,16 @@ from telegram_bot import load_config, save_config, send_now, send_report, send_r
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-import torch
-from sklearn.ensemble import RandomForestClassifier
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ModuleNotFoundError:
+    TORCH_AVAILABLE = False
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    SKLEARN_AVAILABLE = True
+except ModuleNotFoundError:
+    SKLEARN_AVAILABLE = False
 import plotly.graph_objects as go
 import yfinance as yf
 
@@ -133,6 +141,8 @@ def evaluate_accuracy():
             "details": sorted(results, key=lambda x: x['date'], reverse=True)}
 
 def rf_analysis(sym):
+    if not SKLEARN_AVAILABLE:
+        return None
     try:
         df = yf.download(sym, period="1y", progress=False)
         if df.empty or len(df) < 40:
