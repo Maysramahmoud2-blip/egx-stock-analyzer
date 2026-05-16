@@ -10,3 +10,5 @@ venv/
 telegram_config.txt
 predictions.db
 models/
+daily_err.txt
+predictions_history.csv
