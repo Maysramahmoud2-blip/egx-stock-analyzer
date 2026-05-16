@@ -653,7 +653,8 @@ with tab2:
                     if fig:
                         st.plotly_chart(fig, width='stretch')
                 else:
-                    a.plot_chart()
+                    fig = a.plot_chart()
+                    st.pyplot(fig)
             with col_excel:
                 excel_data = make_excel(sym, sym)
                 if excel_data:

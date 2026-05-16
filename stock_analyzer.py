@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -342,8 +343,45 @@ class StockAnalyzer:
         plt.tight_layout()
         if save:
             plt.savefig(BASE_DIR / f'{self.symbol}_analysis.png', dpi=150)
-            print("تم حفظ الشارت بنجاح")
-        plt.show()
+        return fig
+
+    def plot_candlestick(self):
+        df = self.data.tail(100).copy()
+        if df.empty or 'close' not in df.columns:
+            return None
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=df.index, open=df['open'], high=df['high'],
+            low=df['low'], close=df['close'],
+            name='الشموع', increasing_line_color='#4CAF50', decreasing_line_color='#F44336'
+        ))
+        if 'sma_20' in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df['sma_20'], mode='lines',
+                name='SMA 20', line=dict(color='#FF9800', width=1, dash='dash')))
+        if 'sma_50' in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df['sma_50'], mode='lines',
+                name='SMA 50', line=dict(color='#E91E63', width=1, dash='dash')))
+        if 'bb_upper' in df.columns and 'bb_lower' in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df['bb_upper'], mode='lines',
+                name='BB Upper', line=dict(color='gray', width=0.5), showlegend=False))
+            fig.add_trace(go.Scatter(x=df.index, y=df['bb_lower'], mode='lines',
+                name='BB Lower', line=dict(color='gray', width=0.5), fill='tonexty',
+                fillcolor='rgba(128,128,128,0.1)', showlegend=False))
+        s_level, r_level = self.find_support_resistance()
+        if s_level:
+            fig.add_hline(y=s_level, line_color='#4CAF50', line_dash='dot', line_width=1.5,
+                annotation_text=f'دعم {s_level:.2f}')
+        if r_level:
+            fig.add_hline(y=r_level, line_color='#F44336', line_dash='dot', line_width=1.5,
+                annotation_text=f'مقاومة {r_level:.2f}')
+        fig.update_layout(
+            title=f'{self.symbol} — الشموع التفاعلية',
+            xaxis_title='التاريخ', yaxis_title='السعر',
+            template='plotly_dark', height=500,
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=0, r=0, t=40, b=0)
+        )
+        return fig
 
     def detect_patterns(self):
         df = self.data.tail(60).copy()
